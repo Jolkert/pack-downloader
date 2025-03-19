@@ -15,15 +15,15 @@ pub struct LauncherProfilesObject
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct LauncherProfile
 {
-	pub name: String,
-	pub icon: String,
+	pub name: Option<String>,
+	pub icon: Option<String>,
 	#[serde(rename = "lastVersionId")]
-	pub last_version_id: String,
+	pub last_version_id: Option<String>,
 	#[serde(rename = "type")]
-	pub version_type: String,
-	pub created: String,
+	pub version_type: Option<String>,
+	pub created: Option<String>,
 	#[serde(rename = "lastUsed")]
-	pub last_used: String,
+	pub last_used: Option<String>,
 	#[serde(rename = "javaArgs")]
 	pub java_args: Option<String>,
 	#[serde(rename = "gameDir")]
@@ -53,6 +53,10 @@ pub fn create_profiles(
 
 		if std::fs::exists(&profiles_file_path)?
 		{
+			log::info!(
+				"Reading launcher profile information from {}",
+				profiles_file_path.to_string_lossy()
+			);
 			create_launcher_profile(&profiles_file_path, pack_info, out_dir)?;
 		}
 	}
@@ -73,12 +77,12 @@ fn create_launcher_profile(
 	if !profiles_object.profiles.contains_key(&profile_id)
 	{
 		let new_profile = LauncherProfile {
-			name: profile_id.clone(),
-			icon: String::from("SOUL_SAND"),
-			last_version_id: pack_info.forge_version.clone(),
-			version_type: String::from("custom"),
-			created: chrono::Utc::now().to_rfc3339(),
-			last_used: chrono::Utc::now().to_rfc3339(),
+			name: Some(profile_id.clone()),
+			icon: Some(String::from("SOUL_SAND")),
+			last_version_id: Some(pack_info.forge_version.clone()),
+			version_type: Some(String::from("custom")),
+			created: Some(chrono::Utc::now().to_rfc3339()),
+			last_used: Some(chrono::Utc::now().to_rfc3339()),
 			java_args: Some(String::from(
 				"-Xmx6G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M",
 			)),
@@ -94,6 +98,7 @@ fn create_launcher_profile(
 		profiles_object.profiles.insert(profile_id, new_profile);
 	}
 
+	log::info!("Attemping write of profiles file");
 	Ok(std::fs::write(
 		profiles_path,
 		json::to_string_pretty(&profiles_object)?,
