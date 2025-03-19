@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+	path::{Path, PathBuf},
+	thread::current,
+};
 
 use clap::Parser;
 use reqwest::header::Entry;
@@ -23,6 +26,22 @@ async fn main() -> Result<(), DynError>
 async fn run(out_dir: &Path) -> Result<(), DynError>
 {
 	let current_dir = std::env::current_dir()?;
+	let pack_info = read_pack_info(
+		&current_dir
+			.read_dir()?
+			.filter_map(|result| {
+				result.ok().and_then(|entry| {
+					PathBuf::from(entry.file_name())
+						.extension()
+						.and_then(|extension| {
+							(extension == ".packinfo").then_some(PathBuf::from(entry.file_name()))
+						})
+				})
+			})
+			.next()
+			.ok_or(MissingPackInfo)?,
+	);
+
 	for dir_result in std::fs::read_dir(current_dir)?.filter_map(|result| {
 		result.map_or_else(
 			|err| Some(Err(err)),
@@ -50,6 +69,17 @@ async fn run(out_dir: &Path) -> Result<(), DynError>
 
 	Ok(())
 }
+
+fn read_pack_info(path: &Path) -> PackInfo
+{
+	todo!()
+}
+
+struct PackInfo;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Could not find .packinfo file!")]
+struct MissingPackInfo;
 
 #[derive(Debug, clap::Parser)]
 struct Args
