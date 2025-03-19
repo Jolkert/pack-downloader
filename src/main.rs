@@ -1,10 +1,14 @@
+mod errors;
+mod launcher_profiles;
+
 use std::{
+	fmt::Display,
+	io,
 	path::{Path, PathBuf},
-	thread::current,
 };
 
 use clap::Parser;
-use reqwest::header::Entry;
+use errors::{ForgeInstallError, HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
 
 type DynError = Box<dyn std::error::Error + Sync + Send>;
 
@@ -14,35 +18,45 @@ async fn main() -> Result<(), DynError>
 	env_logger::init();
 	let args = Args::parse();
 
-	let result = run(&args.out_dir).await;
+	let result = run(args).await;
 	if let Err(error) = &result
 	{
 		log::error!("A fatal error has occured! {error}");
+	}
+	else
+	{
+		log::info!("Successfully installed!");
 	}
 
 	result
 }
 
-async fn run(out_dir: &Path) -> Result<(), DynError>
+async fn run(args: Args) -> Result<(), DynError>
 {
-	let current_dir = std::env::current_dir()?;
-	let pack_info = read_pack_info(
-		&current_dir
-			.read_dir()?
+	let pwd = std::env::current_dir()?.canonicalize()?;
+	let minecraft_dir = get_mc_dir()?.canonicalize()?;
+
+	install_forge(&args.forge_installer)?;
+
+	let pack_info = PackInfo::read_from_path(
+		&pwd.read_dir()?
 			.filter_map(|result| {
 				result.ok().and_then(|entry| {
-					PathBuf::from(entry.file_name())
-						.extension()
-						.and_then(|extension| {
-							(extension == ".packinfo").then_some(PathBuf::from(entry.file_name()))
-						})
+					(entry.file_name() == "packinfo.toml").then(|| pwd.join(entry.file_name()))
 				})
 			})
 			.next()
-			.ok_or(MissingPackInfo)?,
-	);
+			.ok_or(MissingPackInfoError)?,
+	)?;
 
-	for dir_result in std::fs::read_dir(current_dir)?.filter_map(|result| {
+	let out_dir = args
+		.out_dir
+		.unwrap_or_else(|| minecraft_dir.join(&pack_info.name))
+		.canonicalize()?;
+
+	launcher_profiles::create_profiles(&minecraft_dir, &pack_info, &out_dir)?;
+
+	for dir_result in std::fs::read_dir(pwd)?.filter_map(|result| {
 		result.map_or_else(
 			|err| Some(Err(err)),
 			|entry| {
@@ -63,6 +77,7 @@ async fn run(out_dir: &Path) -> Result<(), DynError>
 			Ok(dir) =>
 			{
 				// by this point `dir` should be guaranteed to be a directory if i wrote the above filter_map right -morgan 2025-03-18
+				recursive_copy(dir.path(), &out_dir, dir.file_name() != "config")?;
 			}
 		}
 	}
@@ -70,20 +85,98 @@ async fn run(out_dir: &Path) -> Result<(), DynError>
 	Ok(())
 }
 
-fn read_pack_info(path: &Path) -> PackInfo
+fn install_forge(installer_path: &Path) -> Result<(), DynError>
 {
-	todo!()
+	std::process::Command::new("java")
+		.arg("-jar")
+		.arg(installer_path.to_str().ok_or(MissingInstallerError)?)
+		.spawn()?
+		.wait()?
+		.success()
+		.then_some(Ok(()))
+		.unwrap_or(Err(ForgeInstallError.into()))
 }
 
-struct PackInfo;
+fn get_mc_dir() -> Result<PathBuf, DynError>
+{
+	let home_dir = homedir::my_home()?.ok_or(HomeNotFoundError)?;
+	Ok(append_minecraft(home_dir))
+}
 
-#[derive(Debug, thiserror::Error)]
-#[error("Could not find .packinfo file!")]
-struct MissingPackInfo;
+fn append_minecraft(mut path: PathBuf) -> PathBuf
+{
+	if cfg!(target_os = "windows")
+	{
+		path.push("AppData");
+		path.push("Roaming");
+	}
+
+	path.push(".minecraft");
+	path
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PackInfo
+{
+	name: String,
+	pack_version: String,
+	mc_version: String,
+	forge_version: String,
+}
+impl Display for PackInfo
+{
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+	{
+		write!(f, "{}-{}_{}", self.name, self.pack_version, self.mc_version)
+	}
+}
+impl PackInfo
+{
+	fn read_from_path(path: &Path) -> Result<Self, DynError>
+	{
+		Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+	}
+}
 
 #[derive(Debug, clap::Parser)]
 struct Args
 {
 	#[arg(short, long)]
-	out_dir: Box<Path>,
+	forge_installer: PathBuf,
+
+	#[arg(short, long)]
+	out_dir: Option<PathBuf>,
+}
+
+// yoinked from https://nick.groenen.me/notes/recursively-copy-files-in-rust/
+// yes i couldve written this on my own but its 5am ok im tired
+// - morgan 2025-03-19
+fn recursive_copy(
+	source: impl AsRef<Path>,
+	destination: impl AsRef<Path>,
+	should_overwrite: bool,
+) -> io::Result<()>
+{
+	std::fs::create_dir_all(&destination)?;
+	for entry in std::fs::read_dir(source)?
+	{
+		let entry = entry?;
+		if entry.file_type()?.is_dir()
+		{
+			recursive_copy(
+				entry.path(),
+				destination.as_ref().join(entry.file_name()),
+				should_overwrite,
+			)?;
+		}
+		else
+		{
+			if should_overwrite || !std::fs::exists(destination.as_ref())?
+			{
+				std::fs::copy(entry.path(), destination.as_ref().join(entry.file_name()))?;
+			}
+		}
+	}
+
+	Ok(())
 }
