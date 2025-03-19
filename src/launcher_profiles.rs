@@ -47,13 +47,13 @@ pub fn create_profiles(
 	out_dir: &Path,
 ) -> Result<(), DynError>
 {
-	for file_name in VALID_LAUNCHER_PROFILE_FILES.iter()
+	for file_name in &VALID_LAUNCHER_PROFILE_FILES
 	{
 		let profiles_file_path = minecraft_dir.join(file_name);
 
 		if std::fs::exists(&profiles_file_path)?
 		{
-			create_launcher_profile(&profiles_file_path, pack_info, out_dir)?
+			create_launcher_profile(&profiles_file_path, pack_info, out_dir)?;
 		}
 	}
 

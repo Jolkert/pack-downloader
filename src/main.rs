@@ -10,15 +10,14 @@ use std::{
 use clap::Parser;
 use errors::{ForgeInstallError, HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
 
-type DynError = Box<dyn std::error::Error + Sync + Send>;
+type DynError = Box<dyn std::error::Error>;
 
-#[tokio::main]
-async fn main() -> Result<(), DynError>
+fn main() -> Result<(), DynError>
 {
 	env_logger::init();
 	let args = Args::parse();
 
-	let result = run(args).await;
+	let result = run(args);
 	if let Err(error) = &result
 	{
 		log::error!("A fatal error has occured! {error}");
@@ -31,7 +30,7 @@ async fn main() -> Result<(), DynError>
 	result
 }
 
-async fn run(args: Args) -> Result<(), DynError>
+fn run(args: Args) -> Result<(), DynError>
 {
 	let pwd = std::env::current_dir()?.canonicalize()?;
 	let minecraft_dir = get_mc_dir()?.canonicalize()?;
@@ -40,12 +39,11 @@ async fn run(args: Args) -> Result<(), DynError>
 
 	let pack_info = PackInfo::read_from_path(
 		&pwd.read_dir()?
-			.filter_map(|result| {
+			.find_map(|result| {
 				result.ok().and_then(|entry| {
 					(entry.file_name() == "packinfo.toml").then(|| pwd.join(entry.file_name()))
 				})
 			})
-			.next()
 			.ok_or(MissingPackInfoError)?,
 	)?;
 
@@ -72,7 +70,7 @@ async fn run(args: Args) -> Result<(), DynError>
 		{
 			Err(err) =>
 			{
-				log::warn!("Failed to read directory entry! {err}")
+				log::warn!("Failed to read directory entry! {err}");
 			}
 			Ok(dir) =>
 			{
@@ -87,14 +85,19 @@ async fn run(args: Args) -> Result<(), DynError>
 
 fn install_forge(installer_path: &Path) -> Result<(), DynError>
 {
-	std::process::Command::new("java")
+	if std::process::Command::new("java")
 		.arg("-jar")
 		.arg(installer_path.to_str().ok_or(MissingInstallerError)?)
 		.spawn()?
 		.wait()?
 		.success()
-		.then_some(Ok(()))
-		.unwrap_or(Err(ForgeInstallError.into()))
+	{
+		Ok(())
+	}
+	else
+	{
+		Err(ForgeInstallError.into())
+	}
 }
 
 fn get_mc_dir() -> Result<PathBuf, DynError>
