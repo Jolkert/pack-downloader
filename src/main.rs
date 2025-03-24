@@ -2,18 +2,21 @@ mod errors;
 mod launcher_profiles;
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, hash_map},
 	fmt::Display,
 	io,
 	path::{Path, PathBuf},
 };
 
 use clap::Parser;
-use errors::{HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
+use errors::{BadUrlError, HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
+use reqwest::Response;
+use tokio::task::JoinSet;
 
-type DynError = Box<dyn std::error::Error>;
+type DynError = Box<dyn std::error::Error + Sync + Send>;
 
-fn main() -> Result<(), DynError>
+#[tokio::main]
+async fn main() -> Result<(), DynError>
 {
 	unsafe {
 		std::env::set_var("RUST_LOG", "INFO");
@@ -21,7 +24,7 @@ fn main() -> Result<(), DynError>
 	env_logger::init();
 	let args = Args::parse();
 
-	let result = run_no_gui(args);
+	let result = run_no_gui(args).await;
 
 	if let Err(error) = &result
 	{
@@ -35,7 +38,7 @@ fn main() -> Result<(), DynError>
 	result
 }
 
-fn run_no_gui(args: Args) -> Result<(), DynError>
+async fn run_no_gui(args: Args) -> Result<(), DynError>
 {
 	let pwd = std::env::current_dir()?.canonicalize()?;
 	let minecraft_dir = get_mc_dir()?.canonicalize()?;
@@ -51,10 +54,15 @@ fn run_no_gui(args: Args) -> Result<(), DynError>
 			.ok_or(MissingPackInfoError)?,
 	)?;
 
-	if minecraft_dir
-		.join("versions")
-		.read_dir()?
-		.any(|entry| entry.is_ok_and(|file| *file.file_name() == *pack_info.forge_version))
+	if minecraft_dir.join("versions").read_dir()?.any(|entry| {
+		entry.is_ok_and(|file| {
+			file.path().file_stem().is_some_and(|file_name| {
+				file_name
+					.to_str()
+					.is_some_and(|file_name_str| file_name_str == pack_info.forge_version)
+			})
+		})
+	})
 	{
 		log::info!("Found correct Forge version. Skipping Forge install");
 	}
@@ -76,7 +84,7 @@ fn run_no_gui(args: Args) -> Result<(), DynError>
 	log::info!("Starting creation of launcher profiles");
 	launcher_profiles::create_profiles(&minecraft_dir, &pack_info, &out_dir)?;
 
-	for dir_result in std::fs::read_dir(pwd)?.filter_map(|result| {
+	for dir_result in std::fs::read_dir(&pwd)?.filter_map(|result| {
 		result.map_or_else(
 			|err| Some(Err(err)),
 			|entry| {
@@ -106,7 +114,94 @@ fn run_no_gui(args: Args) -> Result<(), DynError>
 		}
 	}
 
+	let mut old_version_paths = Vec::new();
+	if let Some(mod_list) = try_read_to_string(pwd.join("mods.toml"))?
+		.map(|string| toml::from_str::<HashMap<String, String>>(&string))
+		.transpose()?
+	{
+		let installed_pack_mods = try_read_to_string(format!("{}.toml", pack_info.name))?
+			.map(|toml_str| toml::from_str::<InstalledPack>(&toml_str))
+			.transpose()?
+			.map(|pack| pack.mod_list)
+			.unwrap_or_default();
+
+		let join_set = mod_list
+			.into_iter()
+			.filter_map(|(mod_name, url)| {
+				if let Some(old_file_name) = installed_pack_mods.get(&mod_name)
+				{
+					old_version_paths.push(out_dir.join("mods").join(old_file_name));
+					url.matches(old_file_name.to_str().unwrap())
+						.next()
+						.is_some()
+						.then(|| tokio::task::spawn(download_file(url)))
+				}
+				else
+				{
+					Some(tokio::task::spawn(download_file(url)))
+				}
+			})
+			.collect::<JoinSet<_>>();
+
+		let join_results = join_set.join_all().await;
+		for join_result in &join_results
+		{
+			match join_result
+			{
+				Ok(Ok(_)) => (),
+				Ok(Err(err)) => log::error!("Failed to download file! {err}"),
+				Err(err) => log::error!("Failed to join thread! {err}"),
+			}
+		}
+
+		if join_results
+			.iter()
+			.all(|result| result.as_ref().is_ok_and(|inner| inner.is_ok()))
+		{
+			for path in old_version_paths
+			{
+				std::fs::remove_file(path)?;
+			}
+			for file in std::fs::read_dir("./.mod_installer_temp")?
+			{
+				let file = file?;
+				std::fs::copy(file.path(), out_dir.join("mods").join(file.file_name()))?;
+			}
+		}
+		else
+		{
+			log::error!("Could not download all mods! Aborting mods download!");
+		}
+
+		std::fs::remove_dir_all("./.mod_installer_temp/")?;
+	}
+	else
+	{
+		log::warn!("No mods.toml file found!");
+	}
+
 	Ok(())
+}
+
+fn try_read_to_string(path: impl AsRef<Path>) -> std::io::Result<Option<String>>
+{
+	std::fs::exists(&path)?
+		.then(|| std::fs::read_to_string(&path))
+		.transpose()
+}
+
+async fn download_file(url: String) -> Result<String, DynError>
+{
+	let file_name =
+		urlencoding::decode(url.split('/').next_back().ok_or(BadUrlError)?.trim())?.into_owned();
+
+	log::info!("Downloading {file_name}");
+
+	let bytes = reqwest::get(url).await?.bytes().await?;
+	let path = PathBuf::from("./.mod_installer_temp").join(&file_name);
+	tokio::fs::write(path, bytes).await?;
+
+	Ok(file_name)
 }
 
 fn install_forge(installer_path: &Path) -> Result<(), DynError>
@@ -133,7 +228,7 @@ fn get_mc_dir() -> Result<PathBuf, DynError>
 {
 	let home_dir = homedir::my_home()?.ok_or(HomeNotFoundError)?;
 	let ret = append_minecraft(home_dir);
-	log::info!("Foubd minecraft directory at {}", ret.to_string_lossy());
+	log::info!("Found minecraft directory at {}", ret.to_string_lossy());
 	Ok(ret)
 }
 
@@ -149,7 +244,7 @@ fn append_minecraft(mut path: PathBuf) -> PathBuf
 	path
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PackInfo
 {
 	name: String,
@@ -172,7 +267,12 @@ impl PackInfo
 	}
 }
 
-type ModList = HashMap<String, PathBuf>;
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct InstalledPack
+{
+	pack_info: PackInfo,
+	mod_list: HashMap<String, PathBuf>,
+}
 
 #[derive(Debug, clap::Parser)]
 pub struct Args

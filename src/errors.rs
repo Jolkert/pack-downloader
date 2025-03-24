@@ -17,3 +17,7 @@ pub struct HomeNotFoundError;
 #[derive(Debug, thiserror::Error)]
 #[error("Could not encode out directory as utf-8!")]
 pub struct BadOutDirError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("File url not / separated!")]
+pub struct BadUrlError;
