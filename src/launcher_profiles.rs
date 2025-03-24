@@ -64,6 +64,9 @@ pub fn create_profiles(
 	Ok(())
 }
 
+// allowed for now because the autoreplace doesnt compile and i have more important
+// things to worry about rn - morgan 2025-03-23
+#[allow(clippy::map_entry)]
 fn create_launcher_profile(
 	profiles_path: &Path,
 	pack_info: &PackInfo,

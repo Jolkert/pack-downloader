@@ -38,7 +38,7 @@ fn run(args: Args) -> Result<(), DynError>
 	let pwd = std::env::current_dir()?.canonicalize()?;
 	let minecraft_dir = get_mc_dir()?.canonicalize()?;
 
-	install_forge(&args.forge_installer, &minecraft_dir)?;
+	install_forge(&args.forge_installer)?;
 
 	log::info!("Attemping to read packinfo.toml");
 	let pack_info = PackInfo::read_from_path(
@@ -97,7 +97,7 @@ fn run(args: Args) -> Result<(), DynError>
 	Ok(())
 }
 
-fn install_forge(installer_path: &Path, minecraft_dir: &Path) -> Result<(), DynError>
+fn install_forge(installer_path: &Path) -> Result<(), DynError>
 {
 	log::info!("Beginning forge install");
 	if std::process::Command::new("java")
