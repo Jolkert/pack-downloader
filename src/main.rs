@@ -2,13 +2,14 @@ mod errors;
 mod launcher_profiles;
 
 use std::{
+	collections::HashMap,
 	fmt::Display,
 	io,
 	path::{Path, PathBuf},
 };
 
 use clap::Parser;
-use errors::{ForgeInstallError, HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
+use errors::{HomeNotFoundError, MissingInstallerError, MissingPackInfoError};
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -20,7 +21,8 @@ fn main() -> Result<(), DynError>
 	env_logger::init();
 	let args = Args::parse();
 
-	let result = run(args);
+	let result = run_no_gui(args);
+
 	if let Err(error) = &result
 	{
 		log::error!("A fatal error has occured! {error}");
@@ -33,14 +35,12 @@ fn main() -> Result<(), DynError>
 	result
 }
 
-fn run(args: Args) -> Result<(), DynError>
+fn run_no_gui(args: Args) -> Result<(), DynError>
 {
 	let pwd = std::env::current_dir()?.canonicalize()?;
 	let minecraft_dir = get_mc_dir()?.canonicalize()?;
 
-	install_forge(&args.forge_installer)?;
-
-	log::info!("Attemping to read packinfo.toml");
+	log::info!("Reading packinfo.toml");
 	let pack_info = PackInfo::read_from_path(
 		&pwd.read_dir()?
 			.find_map(|result| {
@@ -50,7 +50,19 @@ fn run(args: Args) -> Result<(), DynError>
 			})
 			.ok_or(MissingPackInfoError)?,
 	)?;
-	log::info!("Successful read of packinfo.toml");
+
+	if minecraft_dir
+		.join("versions")
+		.read_dir()?
+		.any(|entry| entry.is_ok_and(|file| *file.file_name() == *pack_info.forge_version))
+	{
+		log::info!("Found correct Forge version. Skipping Forge install");
+	}
+	else
+	{
+		log::info!("Correct Forge version not found. Running Forge installer");
+		install_forge(&args.forge_installer)?;
+	}
 
 	log::info!("Reading output directory");
 	let out_dir = {
@@ -107,13 +119,14 @@ fn install_forge(installer_path: &Path) -> Result<(), DynError>
 		.wait()?
 		.success()
 	{
-		log::info!("Installed forge");
-		Ok(())
+		log::info!("Successfully installed forge");
 	}
 	else
 	{
-		Err(ForgeInstallError.into())
+		log::warn!("Failed to install forge")
 	}
+
+	Ok(())
 }
 
 fn get_mc_dir() -> Result<PathBuf, DynError>
@@ -159,14 +172,16 @@ impl PackInfo
 	}
 }
 
+type ModList = HashMap<String, PathBuf>;
+
 #[derive(Debug, clap::Parser)]
-struct Args
+pub struct Args
 {
 	#[arg(short, long)]
-	forge_installer: PathBuf,
+	pub forge_installer: PathBuf,
 
 	#[arg(short, long)]
-	out_dir: Option<PathBuf>,
+	pub out_dir: Option<PathBuf>,
 }
 
 // yoinked from https://nick.groenen.me/notes/recursively-copy-files-in-rust/
